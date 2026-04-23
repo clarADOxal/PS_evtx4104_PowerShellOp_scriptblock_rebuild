@@ -1,0 +1,97 @@
+# 1. Demande du chemin à l'utilisateur
+Write-Host "--- Analyseur PowerShell Forensic (XML + Timestamp Nom Fichier) ---" -ForegroundColor Cyan
+$UserInput = Read-Host "Entrez le chemin du dossier Logs"
+
+# NETTOYAGE : On garde les %3A pour la compatibilité LiteralPath
+$EvtxPath = $UserInput.Trim('"').Trim("'").Trim()
+
+# 2. Configuration des sorties avec Date/Heure dans le nom
+$ScriptDir = if ($PSScriptRoot) { $PSScriptRoot } else { Get-Location }
+$OutDir = Join-Path $ScriptDir "out"
+$TimestampFile = Get-Date -Format "yyyyMMdd_HHmm"
+$OutFile = Join-Path $OutDir "powershell_reconstructed_$TimestampFile.txt"
+
+if (-not (Test-Path $OutDir)) { New-Item -ItemType Directory -Path $OutDir -Force | Out-Null }
+
+# 3. Recherche du fichier .evtx
+$LogFile = Get-ChildItem -LiteralPath $EvtxPath -Filter "*PowerShell*Operational.evtx" -Recurse -ErrorAction SilentlyContinue | Select-Object -First 1
+
+if ($null -eq $LogFile) {
+    $LogFile = Get-ChildItem -LiteralPath $EvtxPath -File | Where-Object { $_.Name -match "PowerShell" -and $_.Name -match "Operational" } | Select-Object -First 1
+}
+
+if ($null -eq $LogFile) {
+    Write-Host "ERREUR : Fichier .evtx introuvable dans ce répertoire." -ForegroundColor Red
+    exit
+}
+
+# 4. Copie temporaire
+$TempEvtx = Join-Path $env:TEMP "forensic_xml_work.evtx"
+Copy-Item -LiteralPath $LogFile.FullName -Destination $TempEvtx -Force
+
+# 5. Extraction et Reconstruction via XML
+Write-Host "Lecture du fichier : $($LogFile.Name)" -ForegroundColor Gray
+try {
+    $Events = Get-WinEvent -Path $TempEvtx | Where-Object { $_.Id -eq 4104 }
+} catch {
+    Write-Host "Aucun événement 4104 trouvé." -ForegroundColor Orange
+    Remove-Item $TempEvtx -ErrorAction SilentlyContinue
+    exit
+}
+
+$Reconstructed = $Events | ForEach-Object {
+    try {
+        $EventXml = [xml]$_.ToXml()
+        $DataFields = $EventXml.Event.EventData.Data
+        
+        [PSCustomObject]@{
+            Date          = $_.TimeCreated
+            ScriptBlockId = ($DataFields | Where-Object { $_.Name -eq "ScriptBlockId" })."#text"
+            MessageNumber = [int]($DataFields | Where-Object { $_.Name -eq "MessageNumber" })."#text"
+            ScriptText    = ($DataFields | Where-Object { $_.Name -eq "ScriptBlockText" })."#text"
+            User          = $_.UserId
+        }
+    } catch { $null }
+} | Where-Object { $null -ne $_ } | Group-Object ScriptBlockId | ForEach-Object {
+    $SortedParts = $_.Group | Sort-Object MessageNumber
+    $FullCode = ($SortedParts.ScriptText) -join ""
+    
+    if ($FullCode.Trim().Length -gt 5) {
+        $UserName = "SID: $($SortedParts[0].User)"
+        try { $UserName = $SortedParts[0].User.Translate([System.Security.Principal.NTAccount]).Value } catch { }
+
+        [PSCustomObject]@{
+            Date   = $SortedParts[0].Date
+            User   = $UserName
+            Script = $FullCode
+        }
+    }
+}
+
+# 6. Écriture du rapport final
+$ExecutionDate = Get-Date -Format "dd/MM/yyyy HH:mm:ss"
+
+try {
+    $Stream = New-Object System.IO.StreamWriter($OutFile, $false, [System.Text.Encoding]::UTF8)
+    $Stream.WriteLine("================================================================================")
+    $Stream.WriteLine("RAPPORT D'INVESTIGATION POWERSHELL")
+    $Stream.WriteLine("DATE D'EXÉCUTION DU SCRIPT : $ExecutionDate")
+    $Stream.WriteLine("SOURCE ANALYSÉE            : $($LogFile.FullName)")
+    $Stream.WriteLine("FICHIER DE SORTIE          : $(Split-Path $OutFile -Leaf)")
+    $Stream.WriteLine("================================================================================")
+
+    foreach ($item in ($Reconstructed | Sort-Object Date)) {
+        $Stream.WriteLine("`n" + "#" * 80)
+        $Stream.WriteLine("# DATE ÉVÉNEMENT : $($item.Date.ToString('dd/MM/yyyy HH:mm:ss'))")
+        $Stream.WriteLine("# UTILISATEUR    : $($item.User)")
+        $Stream.WriteLine("#" * 80)
+        $Stream.WriteLine($item.Script)
+    }
+    $Stream.Close()
+    Write-Host "TERMINE ! Rapport créé : $OutFile" -ForegroundColor Green
+} catch {
+    Write-Error "Impossible d'écrire le rapport : $($_.Exception.Message)"
+}
+
+# Nettoyage
+Remove-Item $TempEvtx -ErrorAction SilentlyContinue
