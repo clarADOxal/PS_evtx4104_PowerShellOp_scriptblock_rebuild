@@ -10,6 +10,7 @@ $ScriptDir = if ($PSScriptRoot) { $PSScriptRoot } else { Get-Location }
 $OutDir = Join-Path $ScriptDir "out"
 $TimestampFile = Get-Date -Format "yyyyMMdd_HHmm"
 $OutFile = Join-Path $OutDir "powershell_reconstructed_$TimestampFile.txt"
+$OutFile2 = Join-Path $OutDir "powershell_reconstructed_recap_$TimestampFile.txt"
 
 if (-not (Test-Path $OutDir)) { New-Item -ItemType Directory -Path $OutDir -Force | Out-Null }
 
@@ -86,9 +87,11 @@ try {
         $Stream.WriteLine("# UTILISATEUR    : $($item.User)")
         $Stream.WriteLine("#" * 80)
         $Stream.WriteLine($item.Script)
+	$recap+="# DATE ÉVÉNEMENT : $($item.Date.ToString('dd/MM/yyyy HH:mm:ss')) // UTILISATEUR    : $($item.User)`n" 
     }
     $Stream.Close()
     Write-Host "TERMINE ! Rapport créé : $OutFile" -ForegroundColor Green
+	$recap >> $OutFile2
 } catch {
     Write-Error "Impossible d'écrire le rapport : $($_.Exception.Message)"
 }
